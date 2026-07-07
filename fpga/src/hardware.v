@@ -720,3 +720,21 @@ module FreqMeasure
     assign n = l_n;
     assign done = r_done;
 endmodule
+
+module Buzzer
+#(
+    parameter CLK_FREQ = 100_000_000,  // Hz
+    parameter BUZZER_FREQ = 440_000  // mHz
+)
+(
+    input clk, rstn,
+    output beep
+);
+    localparam DIV_CNT = CLK_FREQ * 1000 / BUZZER_FREQ;
+    DIV #(DIV_CNT) div
+    (
+        .clk(clk),
+        .rstn(rstn),
+        .clk_div(beep)
+    );
+endmodule

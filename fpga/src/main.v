@@ -9,14 +9,24 @@ module main
     input [5:0] mode_cs,
     output [7:0] range_leds,
     output [3:0] unit_leds,
+    output [2:0] cba_channel,
 
     // ADC
     input d_in,
-    input [1:0] channel,
     output sclk, csn, d_out,
 
     // C
-    input c_signal
+    input c_signal,
+
+    // L
+    input l_signal,
+
+    // DC
+    input dc_switch_signal,
+
+    // CT
+    input ct_signal,
+    output beep
 );
     pll pll_inst
     (
@@ -24,17 +34,27 @@ module main
         .c0(clk_100M)
     );
 
+    wire sync_dc_switch_signal;
+    SignalSync ss
+    (
+        .clk(clk_100M),
+        .rstn(rstn),
+        .signal(dc_switch_signal),
+        .signal_sync(sync_dc_switch_signal)
+    );
+
     wire clk_1k;
     DIV #(.NUM_DIV(100000)) div1k(clk_100M, rstn, clk_1k);
 
     wire [19:0] mvoltage;  // UQ11.9
     wire adc_done;
+    reg [1:0] adc_channel;
     ADC adc_inst
     (
         .clk(clk_100M),
         .rstn(rstn),
         .d_in(d_in),
-        .channel(channel),
+        .channel(adc_channel),
         .mvoltage(mvoltage),
         .sclk(sclk),
         .csn(csn),
@@ -44,11 +64,12 @@ module main
 
     wire freq_done;
     wire [31:0] m, n;
+    reg freq_signal;
     FreqMeasure fq
     (
         .clk(clk_100M),
         .rstn(rstn),
-        .signal(c_signal),
+        .signal(freq_signal),
         .done(freq_done),
         .m(m),
         .n(n)
@@ -66,7 +87,20 @@ module main
         .done     (mdn_done)
     );
 
-    wire [36:0] c_res;
+    reg [19:0] vol_k;
+    wire [31:0] kv;
+    wire kv_done;
+    KV kv_inst (
+        .clk(clk_100M),
+        .rstn(rstn),
+        .adc_done(adc_done),
+        .k(vol_k),
+        .v(mvoltage),
+        .kv(kv),
+        .done(kv_done)
+    );
+
+    wire [31:0] c_res;
     wire c_done;
     CMeasure cMeasure (
         .clk      (clk_100M),
@@ -77,17 +111,85 @@ module main
         .done     (c_done)
     );
 
+    wire [31:0] l_res;
+    wire l_done;
+    LMeasure lMeasure (
+        .clk      (clk_100M),
+        .rstn     (rstn),
+        .mdn_done (mdn_done),
+        .mdn      (mdn),  
+        .out      (l_res),
+        .done     (l_done)
+    );
+
+    wire [31:0] resistor_res;
+    wire resistor_done;
+    wire [2:0] resistor_channel;
+    RMeasure rmeasure (
+        .clk(clk_100M),
+        .rstn(rstn),
+        .adc_done(adc_done),
+        .mvoltage(mvoltage),
+        .out(resistor_res),
+        .done(resistor_done),
+        .channel(resistor_channel)
+    );
+
+    wire [31:0] dc_res;
+    wire dc_done;
+    wire [2:0] dc_channel;
+    wire [19:0] dc_k;
+    DCMeasure dcmeasure (
+        .clk(clk_100M),
+        .rstn(rstn),
+        .kv_done(kv_done),
+        .kv(kv),
+        .switch_signal(sync_dc_switch_signal),
+        .out(dc_res),
+        .done(dc_done),
+        .channel(dc_channel),
+        .k(dc_k)
+    );
+
+    wire [31:0] ac_res;
+    wire ac_done;
+    wire [2:0] ac_channel;
+    wire [19:0] ac_k;
+    ACMeasure acmeasure (
+        .clk(clk_100M),
+        .rstn(rstn),
+        .kv_done(kv_done),
+        .kv(kv),
+        .mvoltage(mvoltage),
+        .out(ac_res),
+        .done(ac_done),
+        .channel(ac_channel),
+        .k(ac_k)
+    );
+
+    reg r_ct_signal;
+    CTMeasure ctmeasure
+    (
+        .clk(clk_100M),
+        .rstn(rstn),
+        .signal(r_ct_signal),
+        .beep(beep)
+    );
+
     wire [19:0] rg_bin;
     wire [5:0] point;
     wire [2:0] out_range;
     wire rg_done;
+    reg [31:0] measure_result;
+    reg measure_done;
+    reg [2:0] measure_inrange;
     RangeSelector rg_selector
     (
         .clk(clk_100M),
         .rstn(rstn),
-        .start(c_done),
-        .in(c_res),
-        .in_range(3'd0),
+        .start(measure_done),
+        .in(measure_result),
+        .in_range(measure_inrange),
         .out(rg_bin),
         .point(point),
         .out_range(out_range),
@@ -96,40 +198,125 @@ module main
 
     reg [7:0] r_range_leds;
     reg [3:0] r_unit_leds;
+    reg [2:0] r_cba_channel;
     always @(*)
     begin
         case (mode_cs)
-            6'b000_001: r_unit_leds <= 4'b0010;
-            6'b000_010: r_unit_leds <= 4'b0100;
-            6'b000_100: r_unit_leds <= 4'b1000;
-            6'b001_000: r_unit_leds <= 4'b0001;
-            6'b010_000: r_unit_leds <= 4'b0001;
-            6'b100_000: r_unit_leds <= 4'b0000;
-            default: r_unit_leds <= 4'b0000;
+            6'b000_001:  // R
+            begin
+                r_unit_leds = 4'b0010;
+                measure_result = resistor_res;
+                measure_done = resistor_done;
+                measure_inrange = 3'd5;
+                freq_signal = 1'b0;
+                adc_channel = 2'd0;
+                r_cba_channel = resistor_channel;
+                vol_k = 20'd0;
+                r_ct_signal = 1'b1;
+            end
+            
+            6'b000_010:  // C
+            begin
+                r_unit_leds = 4'b0100;
+                measure_result = c_res;
+                measure_done = c_done;
+                measure_inrange = 3'd0;
+                freq_signal = c_signal;
+                adc_channel = 2'd0;
+                r_cba_channel = 3'd0;
+                vol_k = 20'd0;
+                r_ct_signal = 1'b1;
+            end
+
+            6'b000_100:  // L
+            begin
+                r_unit_leds = 4'b1000;
+                measure_result = l_res;
+                measure_done = l_done;
+                measure_inrange = 3'd2;
+                freq_signal = l_signal;
+                adc_channel = 2'd0;
+                r_cba_channel = 3'd0;
+                vol_k = 20'd0;
+                r_ct_signal = 1'b1;
+            end
+
+            6'b001_000:  // DC
+            begin
+                r_unit_leds = 4'b0001;
+                measure_result = dc_res;
+                measure_done = dc_done;
+                measure_inrange = 3'd3;
+                freq_signal = 1'b0;
+                adc_channel = 2'd1;
+                r_cba_channel = dc_channel;
+                vol_k = dc_k;
+                r_ct_signal = 1'b1;
+            end
+
+            6'b010_000:  // AC
+            begin
+                r_unit_leds = 4'b0001;
+                measure_result = ac_res;
+                measure_done = ac_done;
+                measure_inrange = 3'd3;
+                freq_signal = 1'b0;
+                adc_channel = 2'd2;
+                r_cba_channel = ac_channel;
+                vol_k = ac_k;
+                r_ct_signal = 1'b1;
+            end
+
+            6'b100_000:  // CT
+            begin
+                r_unit_leds = 4'b0000;
+                measure_result = 32'd0;
+                measure_done = 1'b0;
+                measure_inrange = 3'd0;
+                freq_signal = 1'b0;
+                adc_channel = 2'd0;
+                r_cba_channel = 3'd0;
+                vol_k = 20'd0;
+                r_ct_signal = ct_signal;
+            end
+
+            default:
+            begin
+                r_unit_leds = 4'b0000;
+                measure_result = 32'd0;
+                measure_done = 1'b0;
+                measure_inrange = 3'd7;
+                freq_signal = 1'b0;
+                adc_channel = 2'd0;
+                r_cba_channel = 3'd0;
+                vol_k = 20'd0;
+                r_ct_signal = 1'b1;
+            end
         endcase
 
-        if (rg_done)
+        if (mode_cs != 6'b100_000)
         begin
             case (out_range)
-                3'd0: r_range_leds <= 8'b0000_0001;
-                3'd1: r_range_leds <= 8'b0000_0010;
-                3'd2: r_range_leds <= 8'b0000_0100;
-                3'd3: r_range_leds <= 8'b0000_1000;
-                3'd4: r_range_leds <= 8'b0001_0000;
-                3'd5: r_range_leds <= 8'b0010_0000;
-                3'd6: r_range_leds <= 8'b0100_0000;
-                3'd7: r_range_leds <= 8'b1000_0000;
-                default: r_range_leds <= 8'b0000_0000;
+                3'd0: r_range_leds = 8'b0000_0001;
+                3'd1: r_range_leds = 8'b0000_0010;
+                3'd2: r_range_leds = 8'b0000_0100;
+                3'd3: r_range_leds = 8'b0000_1000;
+                3'd4: r_range_leds = 8'b0001_0000;
+                3'd5: r_range_leds = 8'b0010_0000;
+                3'd6: r_range_leds = 8'b0100_0000;
+                3'd7: r_range_leds = 8'b1000_0000;
+                default: r_range_leds = 8'b0000_0000;
             endcase
         end
         else
         begin
-            r_range_leds <= r_range_leds;
+            r_range_leds = 8'b0000_0000;
         end
     end
 
     assign range_leds = r_range_leds;
     assign unit_leds = r_unit_leds;
+    assign cba_channel = r_cba_channel;
 
     wire dgt_update;
     CTU #(
@@ -169,7 +356,7 @@ endmodule
 module RangeSelector
 (
     input clk, rstn, start,
-    input [36:0] in,  // UQ20.17
+    input [31:0] in,  // UQ16.16
     input [2:0] in_range,  // 0:p，6:M, 7:OL
     output [19:0] out,
     output [5:0] point,
@@ -188,6 +375,17 @@ module RangeSelector
         .rstn(rstn),
         .stn(stn),
         .stc(stc)
+    );
+
+    wire [36:0] norm_in; // UQ20.17
+    UnsignedFixedPointNorm #(
+        .Q_IN_INT(16),
+        .Q_IN_FRAC(16),
+        .Q_OUT_INT(20),
+        .Q_OUT_FRAC(17)
+    ) ufpn (
+        .in(in),
+        .out(norm_in)
     );
 
     always @(*)
@@ -213,21 +411,7 @@ module RangeSelector
         .out(target_num)
     );
 
-    wire [36:0] mult10_result;
-    UnsignedFixedPointMult #(
-        .Q_IN_INT_A(20),
-        .Q_IN_FRAC_A(17),
-        .Q_IN_INT_B(4),
-        .Q_IN_FRAC_B(0),
-        .Q_OUT_INT(20),
-        .Q_OUT_FRAC(17)
-    ) mult10 (
-        .clk(clk),
-        .rstn(rstn),
-        .in_a(fp_num),
-        .in_b(4'd10),
-        .out(mult10_result)
-    );
+    wire [36:0] mult10_result = (fp_num << 3) + (fp_num << 1);
 
     assign finish_condition = (target_num >= 20'd10_000 && r_point == 6'b100_000) || (target_num >= 20'd100_000) || (r_range == 3'd7);
 
@@ -259,7 +443,7 @@ module RangeSelector
                     r_done <= 1'b0;
                     r_point <= 6'b000_001;
                     r_range <= in_range;
-                    fp_num <= in;
+                    fp_num <= norm_in;
                 end
 
                 TRANS:
@@ -318,7 +502,7 @@ module RangeSelector
         else
         begin
             rr_out <= target_num;
-            if (r_point == 6'b000_001 || r_point == 6'b000_010 || r_point == 6'b000_100 && r_range < 3'd6)
+            if ((r_point == 6'b000_001 || r_point == 6'b000_010 || r_point == 6'b000_100) && r_range < 3'd6)
             begin
                 rr_point <= r_point << 3;
                 rr_out_range <= r_range + 3'd1;
@@ -413,35 +597,20 @@ module MDN  // 很多模块都要M/N的值，这里统一计算一下
         .out(res)
     );
 
-    reg [31:0] l_out;
     reg r_done;
-    reg is_waiting;
     always @(posedge clk or negedge rstn)
     begin
         if (!rstn)
         begin
             r_done <= 1'b0;
-            is_waiting <= 1'b0;
-            l_out <= 32'b0;
         end
         else
         begin
-            l_out <= l_out;
-            r_done <= 1'b0;
-            if (freq_done && !is_waiting)
-            begin
-                is_waiting <= 1'b1;
-            end
-            else if (is_waiting)
-            begin
-                r_done <= 1'b1;
-                is_waiting <= 1'b0;
-                l_out <= res;
-            end
+            r_done <= freq_done;
         end
     end
 
-    assign out = l_out;
+    assign out = res;
     assign done = r_done;
 endmodule
 
@@ -449,19 +618,19 @@ module CMeasure
 (
     input clk, rstn, mdn_done,
     input [31:0] mdn,  // UQ16.16
-    output [36:0] out,  // UQ20.17
+    output [31:0] out,  // UQ16.16
     output done
 );
     localparam K = 32'd883536129;  // UQ0.32, 1.44/7
 
-    wire [36:0] res;
+    wire [31:0] res;
     UnsignedFixedPointMult #(
         .Q_IN_INT_A(0),
         .Q_IN_FRAC_A(32),
         .Q_IN_INT_B(16),
         .Q_IN_FRAC_B(16),
-        .Q_OUT_INT(20),
-        .Q_OUT_FRAC(17)
+        .Q_OUT_INT(16),
+        .Q_OUT_FRAC(16)
     ) mult_inst (
         .clk(clk),
         .rstn(rstn),
@@ -470,34 +639,533 @@ module CMeasure
         .out(res)
     );
 
-    reg [36:0] l_out;
     reg r_done;
-    reg is_waiting;
     always @(posedge clk or negedge rstn)
     begin
         if (!rstn)
         begin
             r_done <= 1'b0;
-            is_waiting <= 1'b0;
-            l_out <= 37'b0;
+        end
+        else
+        begin
+            r_done <= mdn_done;
+        end
+    end
+
+    assign out = res;
+    assign done = r_done;
+endmodule
+
+module LMeasure
+(
+    input clk, rstn, mdn_done,
+    input [31:0] mdn,  // UQ16.16
+    output [31:0] out,  // UQ16.16
+    output done
+);
+    localparam K = 32'd75167004;  // UQ0.32
+
+    wire [31:0] midres;
+    UnsignedFixedPointMult #(
+        .Q_IN_INT_A(0),
+        .Q_IN_FRAC_A(32),
+        .Q_IN_INT_B(16),
+        .Q_IN_FRAC_B(16),
+        .Q_OUT_INT(8),
+        .Q_OUT_FRAC(24)
+    ) mult_inst1 (
+        .clk(clk),
+        .rstn(rstn),
+        .in_a(K),
+        .in_b(mdn),
+        .out(midres)
+    );
+
+    wire [31:0] res;
+    UnsignedFixedPointMult #(
+        .Q_IN_INT_A(8),
+        .Q_IN_FRAC_A(24),
+        .Q_IN_INT_B(8),
+        .Q_IN_FRAC_B(24),
+        .Q_OUT_INT(16),
+        .Q_OUT_FRAC(16)
+    ) mult_inst2 (
+        .clk(clk),
+        .rstn(rstn),
+        .in_a(midres),
+        .in_b(midres),
+        .out(res)
+    );
+
+    reg r_done_1, r_done_2;
+    always @(posedge clk or negedge rstn)
+    begin
+        if (!rstn)
+        begin
+            r_done_1 <= 1'b0;
+            r_done_2 <= 1'b0;
+        end
+        else
+        begin
+            r_done_1 <= mdn_done;
+            r_done_2 <= r_done_1;
+        end
+    end
+
+    assign done = r_done_2;
+endmodule
+
+module RMeasure
+(
+    input clk, rstn, adc_done,
+    input [19:0] mvoltage,  // UQ11.9
+    output [31:0] out,  // UQ16.16
+    output done,
+    output [2:0] channel
+);
+    localparam K0 = 32'd3809280,    B0 = 32'd30802;  // UQ20.12, 16.16
+    localparam K1 = 32'd4030710,    B1 = 32'd32571;
+    localparam K2 = 32'd27330970,   B2 = 32'd220856;
+    localparam K3 = 32'd260090266,  B3 = 32'd2101740;
+    localparam K4 = 32'd2566597018, B4 = 32'd20740178;
+
+    localparam WAIT = 2'd0, CALC = 2'd1, JUDGE = 2'd2, LATCH = 2'd3;
+
+    reg [31:0] k;
+    reg [31:0] b;
+    wire [31:0] midres;
+    UnsignedFixedPointDiv #(
+        .Q_IN_INT_A(20),
+        .Q_IN_FRAC_A(12),
+        .Q_IN_INT_B(11),
+        .Q_IN_FRAC_B(9),
+        .Q_OUT_INT(16),
+        .Q_OUT_FRAC(16)
+    ) div_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .in_a(k),
+        .in_b(mvoltage),
+        .out(midres)
+    );
+
+    wire [31:0] res = midres - b;
+
+    reg [1:0] stn;
+    wire [1:0] stc;
+    FSM #(
+        .N(4),
+        .INITIAL_STATE(WAIT)
+    ) fsm (
+        .clk(clk),
+        .rstn(rstn),
+        .stn(stn),
+        .stc(stc)
+    );
+
+    wire adc_posedge;
+    PosedgeDetector pdt
+    (
+        .clk(clk),
+        .rstn(rstn),
+        .signal_sync(adc_done),
+        .signal_posedge(adc_posedge)
+    );
+
+    // UQ11.9
+    localparam C0L = 20'd820966, C0H = 20'd1013105;
+    localparam C1L = 20'd315489, C1H = 20'd843950;
+    localparam C2L = 20'd237742, C2H = 20'd781778;
+    localparam C3L = 20'd228838, C3H = 20'd772792;
+    localparam C4L = 20'd226493, C4H = 20'd770345;
+    reg [1:0] channel_switch_flag;  // 0：不变； 1：下一个通道； 2：上一个通道
+    always @(*)
+    begin
+        case (channel)
+            3'd0:
+                if (mvoltage < C0L)
+                begin
+                    channel_switch_flag = 2'd1;
+                    k = K1;
+                    b = B1;
+                end
+                else
+                begin
+                    channel_switch_flag = 2'd0;
+                    k = K0;
+                    b = B0;
+                end
+
+            3'd1:
+                if (mvoltage < C1L)
+                begin
+                    channel_switch_flag = 2'd1;
+                    k = K2;
+                    b = B2;
+                end
+                else if (mvoltage > C1H)
+                begin
+                    channel_switch_flag = 2'd2;
+                    k = K0;
+                    b = B0;
+                end
+                else
+                begin
+                    channel_switch_flag = 2'd0;
+                    k = K1;
+                    b = B1;
+                end
+
+            3'd2:
+                if (mvoltage < C2L)
+                begin
+                    channel_switch_flag = 2'd1;
+                    k = K3;
+                    b = B3;
+                end
+                else if (mvoltage > C2H)
+                begin
+                    channel_switch_flag = 2'd2;
+                    k = K1;
+                    b = B1;
+                end
+                else
+                begin
+                    channel_switch_flag = 2'd0;
+                    k = K2;
+                    b = B2;
+                end
+
+            3'd3:
+                if (mvoltage < C3L)
+                begin
+                    channel_switch_flag = 2'd1;
+                    k = K4;
+                    b = B4;
+                end
+                else if (mvoltage > C3H)
+                begin
+                    channel_switch_flag = 2'd2;
+                    k = K2;
+                    b = B2;
+                end
+                else
+                begin
+                    channel_switch_flag = 2'd0;
+                    k = K3;
+                    b = B3;
+                end
+
+            3'd4:
+                if (mvoltage > C4H)
+                begin
+                    channel_switch_flag = 2'd2;
+                    k = K3;
+                    b = B3;
+                end
+                else
+                begin
+                    channel_switch_flag = 2'd0;
+                    k = K4;
+                    b = B4;
+                end
+            
+            default:
+                begin
+                    channel_switch_flag = 2'd0;
+                    k = 32'd0;
+                    b = 32'd0;
+                end
+        endcase
+    end
+
+    always @(*)
+    begin
+        case (stc)
+            WAIT: stn = adc_posedge ? CALC : WAIT;
+            CALC: stn = JUDGE;
+            JUDGE: stn = (channel_switch_flag == 0) ? LATCH : WAIT;
+            LATCH: stn = WAIT;
+            default: stn = WAIT;
+        endcase
+    end
+
+    reg [2:0] r_channel;
+    reg [31:0] l_out;
+    reg r_done;
+    always @(posedge clk or negedge rstn)
+    begin
+        if (!rstn)
+        begin
+            r_channel <= 3'd0;
+            l_out <= 32'd0;
         end
         else
         begin
             l_out <= l_out;
             r_done <= 1'b0;
-            if (mdn_done && !is_waiting)
+            case (stc)
+                WAIT: r_channel <= r_channel;
+                CALC: r_channel <= r_channel;
+                JUDGE:
+                    if (channel_switch_flag == 2'd1 && r_channel < 3'd4)
+                    begin
+                        r_channel <= r_channel + 3'd1;
+                    end
+                    else if (channel_switch_flag == 2'd2 && r_channel > 3'd0)
+                    begin
+                        r_channel <= r_channel - 3'd1;
+                    end
+                    else
+                    begin
+                        r_channel <= r_channel;
+                    end
+
+                LATCH:
+                begin
+                    r_channel <= r_channel;
+                    l_out <= res;
+                    r_done <= 1'b1;
+                end
+                default:
+                begin
+                    r_channel <= r_channel;
+                end
+            endcase
+        end
+    end
+
+    assign channel = r_channel;
+    assign out = l_out;
+    assign done = r_done;
+endmodule
+
+module KV
+(
+    input clk, rstn, adc_done,
+    input [19:0] k,  // UQ4.16
+    input [19:0] v,  // UQ11.9
+    output [31:0] kv,  // UQ16.16
+    output done
+);
+    wire [31:0] res;
+    UnsignedFixedPointMult #(
+        .Q_IN_INT_A(4),
+        .Q_IN_FRAC_A(16),
+        .Q_IN_INT_B(11),
+        .Q_IN_FRAC_B(9),
+        .Q_OUT_INT(16),
+        .Q_OUT_FRAC(16)
+    ) mult_inst (
+        .clk(clk),
+        .rstn(rstn),
+        .in_a(k),
+        .in_b(v),
+        .out(res)
+    );
+
+    reg r_done;
+    always @(posedge clk or negedge rstn)
+    begin
+        if (!rstn)
+        begin
+            r_done <= 1'b0;
+        end
+        else
+        begin
+            r_done <= adc_done;
+        end
+    end
+
+    assign done = r_done;
+    assign kv = res;
+endmodule
+
+module DCMeasure
+(
+    input clk, rstn, kv_done,
+    input [31:0] kv,  // UQ16.16
+    input switch_signal,
+    output [31:0] out,  // UQ16.16
+    output done,
+    output [2:0] channel,
+    output [19:0] k // UQ4.16
+);
+    localparam K0 = 20'd163840, K1 = 20'd491520;
+    wire kv_posedge;
+    PosedgeDetector pdt
+    (
+        .clk(clk),
+        .rstn(rstn),
+        .signal_sync(kv_done),
+        .signal_posedge(kv_posedge)
+    );
+
+    reg [2:0] r_channel;
+    reg [19:0] r_k;
+    reg [31:0] l_out;
+    reg r_done;
+    always @(posedge clk or negedge rstn)
+    begin
+        if (!rstn)
+        begin
+            r_channel <= 3'd0;
+            r_k <= 20'd0;
+            l_out <= 32'd0;
+            r_done <= 1'b0;
+        end
+        else
+        begin
+            l_out <= l_out;
+            r_channel <= r_channel;
+            r_done <= 1'b0;
+            if (kv_posedge)
             begin
-                is_waiting <= 1'b1;
-            end
-            else if (is_waiting)
-            begin
-                r_done <= 1'b1;
-                is_waiting <= 1'b0;
-                l_out <= res;
+                case (r_channel)
+                    3'd0:
+                    begin
+                        if (switch_signal == 1'b0)
+                        begin
+                            r_k <= K0;
+                            l_out <= kv;
+                            r_done <= 1'b1;
+                        end
+                        else
+                        begin
+                            r_k <= K1;
+                            r_channel <= 3'd1;
+                        end
+                    end
+
+                    3'd1:
+                    begin
+                        if (switch_signal == 1'b1)
+                        begin
+                            r_k <= K1;
+                            l_out <= kv;
+                            r_done <= 1'b1;
+                        end
+                        else
+                        begin
+                            r_k <= K0;
+                            r_channel <= 3'd0;
+                        end
+                    end
+
+                    default:
+                    begin
+                        r_k <= 20'd0;
+                    end
+                endcase
             end
         end
     end
 
     assign out = l_out;
     assign done = r_done;
+    assign channel = r_channel;
+    assign k = r_k;
+endmodule
+
+module ACMeasure
+(
+    input clk, rstn, kv_done,
+    input [31:0] kv,  // UQ16.16
+    input [19:0] mvoltage,  // UQ11.9
+    output [31:0] out,  // UQ16.16
+    output done,
+    output [2:0] channel,
+    output [19:0] k // UQ4.16
+);
+    localparam K0 = 20'd8192, K1 = 20'd81920;
+    wire kv_posedge;
+    PosedgeDetector pdt
+    (
+        .clk(clk),
+        .rstn(rstn),
+        .signal_sync(kv_done),
+        .signal_posedge(kv_posedge)
+    );
+
+    localparam C0H = 20'd901120, C1L = 20'd81920;
+    reg [2:0] r_channel;
+    reg [19:0] r_k;
+    reg [31:0] l_out;
+    reg r_done;
+    always @(posedge clk or negedge rstn)
+    begin
+        if (!rstn)
+        begin
+            r_channel <= 3'd0;
+            r_k <= 20'd0;
+            l_out <= 32'd0;
+            r_done <= 1'b0;
+        end
+        else
+        begin
+            l_out <= l_out;
+            r_channel <= r_channel;
+            r_done <= 1'b0;
+            if (kv_posedge)
+            begin
+                case (r_channel)
+                    3'd0:
+                    begin
+                        if (mvoltage <= C0H)
+                        begin
+                            r_k <= K0;
+                            l_out <= kv;
+                            r_done <= 1'b1;
+                        end
+                        else
+                        begin
+                            r_k <= K1;
+                            r_channel <= 3'd1;
+                        end
+                    end
+
+                    3'd1:
+                    begin
+                        if (mvoltage >= C1L)
+                        begin
+                            r_k <= K1;
+                            l_out <= kv;
+                            r_done <= 1'b1;
+                        end
+                        else
+                        begin
+                            r_k <= K0;
+                            r_channel <= 3'd0;
+                        end
+                    end
+
+                    default:
+                    begin
+                        r_k <= 20'd0;
+                    end
+                endcase
+            end
+        end
+    end
+
+    assign out = l_out;
+    assign done = r_done;
+    assign channel = r_channel;
+    assign k = r_k;
+endmodule
+
+module CTMeasure
+(
+    input clk, rstn, signal,
+    output beep
+);
+    wire bz_beep;
+    Buzzer bz
+    (
+        .clk(clk),
+        .rstn(!signal),
+        .beep(bz_beep)
+    );
+
+    assign beep = rstn ? bz_beep : 1'b0;
 endmodule
