@@ -5,11 +5,6 @@ module main
     output  [7:0] seg,
     output  clk_100M,
 
-    // SYS
-    input [5:0] mode_cs,
-    output [7:0] range_leds,
-    output [3:0] unit_leds,
-
     // ADC
     input d_in,
     input [1:0] channel,
@@ -54,33 +49,20 @@ module main
         .n(n)
     );
 
-    wire mdn_done;
-    wire [31:0] mdn;
-    MDN mdn_inst (
+    wire [36:0] c_res;
+    wire c_done
+    CMeasure cMeasure (
         .clk      (clk_100M),
         .rstn     (rstn),
         .freq_done(freq_done),
         .m        (m),
         .n        (n),
-        .out      (mdn),
-        .done     (mdn_done)
-    );
-
-    wire [36:0] c_res;
-    wire c_done;
-    CMeasure cMeasure (
-        .clk      (clk_100M),
-        .rstn     (rstn),
-        .mdn_done (mdn_done),
-        .mdn      (mdn),  
-        .out      (c_res),
+        .c        (c_res),
         .done     (c_done)
     );
 
     wire [19:0] rg_bin;
     wire [5:0] point;
-    wire [2:0] out_range;
-    wire rg_done;
     RangeSelector rg_selector
     (
         .clk(clk_100M),
@@ -90,46 +72,9 @@ module main
         .in_range(3'd0),
         .out(rg_bin),
         .point(point),
-        .out_range(out_range),
-        .done(rg_done)
+        .out_range(),
+        .done()
     );
-
-    reg [7:0] r_range_leds;
-    reg [3:0] r_unit_leds;
-    always @(*)
-    begin
-        case (mode_cs)
-            6'b000_001: r_unit_leds <= 4'b0010;
-            6'b000_010: r_unit_leds <= 4'b0100;
-            6'b000_100: r_unit_leds <= 4'b1000;
-            6'b001_000: r_unit_leds <= 4'b0001;
-            6'b010_000: r_unit_leds <= 4'b0001;
-            6'b100_000: r_unit_leds <= 4'b0000;
-            default: r_unit_leds <= 4'b0000;
-        endcase
-
-        if (rg_done)
-        begin
-            case (out_range)
-                3'd0: r_range_leds <= 8'b0000_0001;
-                3'd1: r_range_leds <= 8'b0000_0010;
-                3'd2: r_range_leds <= 8'b0000_0100;
-                3'd3: r_range_leds <= 8'b0000_1000;
-                3'd4: r_range_leds <= 8'b0001_0000;
-                3'd5: r_range_leds <= 8'b0010_0000;
-                3'd6: r_range_leds <= 8'b0100_0000;
-                3'd7: r_range_leds <= 8'b1000_0000;
-                default: r_range_leds <= 8'b0000_0000;
-            endcase
-        end
-        else
-        begin
-            r_range_leds <= r_range_leds;
-        end
-    end
-
-    assign range_leds = r_range_leds;
-    assign unit_leds = r_unit_leds;
 
     wire dgt_update;
     CTU #(
@@ -302,6 +247,7 @@ module RangeSelector
         end
     end
 
+
     assign done = r_done;
 
     reg [19:0] rr_out;
@@ -318,11 +264,8 @@ module RangeSelector
         else
         begin
             rr_out <= target_num;
-            if (r_point == 6'b000_001 || r_point == 6'b000_010 || r_point == 6'b000_100 && r_range < 3'd6)
-            begin
-                rr_point <= r_point << 3;
-                rr_out_range <= r_range + 3'd1;
-            end
+            rr_point <= r_point;
+            rr_out_range <= r_range;
         end
     end
 
@@ -390,114 +333,80 @@ module ADC
     assign done = r_done;
 endmodule
 
-module MDN  // 很多模块都要M/N的值，这里统一计算一下
+module CMeasure
 (
     input clk, rstn, freq_done,
     input [31:0] m, n,
-    output [31:0] out,  // UQ16.16
+    output [36:0] c,  // UQ20.17
     output done
 );
-    wire [31:0] res;
+    localparam K = 32'd388978170;  // UQ0.32, 144/1590
+
+    wire [31:0] raw; // UQ17.15
     UnsignedFixedPointDiv #(
         .Q_IN_INT_A(32),
         .Q_IN_FRAC_A(0),
         .Q_IN_INT_B(32),
         .Q_IN_FRAC_B(0),
-        .Q_OUT_INT(16),
-        .Q_OUT_FRAC(16)
+        .Q_OUT_INT(17),
+        .Q_OUT_FRAC(15)
     ) div_inst (
         .clk(clk),
         .rstn(rstn),
         .in_a(m),
         .in_b(n),
-        .out(res)
+        .out(raw)
     );
-
-    reg [31:0] l_out;
-    reg r_done;
-    reg is_waiting;
-    always @(posedge clk or negedge rstn)
-    begin
-        if (!rstn)
-        begin
-            r_done <= 1'b0;
-            is_waiting <= 1'b0;
-            l_out <= 32'b0;
-        end
-        else
-        begin
-            l_out <= l_out;
-            r_done <= 1'b0;
-            if (freq_done && !is_waiting)
-            begin
-                is_waiting <= 1'b1;
-            end
-            else if (is_waiting)
-            begin
-                r_done <= 1'b1;
-                is_waiting <= 1'b0;
-                l_out <= res;
-            end
-        end
-    end
-
-    assign out = l_out;
-    assign done = r_done;
-endmodule
-
-module CMeasure
-(
-    input clk, rstn, mdn_done,
-    input [31:0] mdn,  // UQ16.16
-    output [36:0] out,  // UQ20.17
-    output done
-);
-    localparam K = 32'd883536129;  // UQ0.32, 1.44/7
 
     wire [36:0] res;
     UnsignedFixedPointMult #(
         .Q_IN_INT_A(0),
         .Q_IN_FRAC_A(32),
-        .Q_IN_INT_B(16),
-        .Q_IN_FRAC_B(16),
+        .Q_IN_INT_B(17),
+        .Q_IN_FRAC_B(15),
         .Q_OUT_INT(20),
         .Q_OUT_FRAC(17)
     ) mult_inst (
         .clk(clk),
         .rstn(rstn),
         .in_a(K),
-        .in_b(mdn),
+        .in_b(raw),
         .out(res)
     );
 
-    reg [36:0] l_out;
-    reg r_done;
+    reg [36:0] l_res;
+    reg [1:0] wait_ctn;
     reg is_waiting;
+    reg r_done;
     always @(posedge clk or negedge rstn)
     begin
+        wait_ctn <= 2'b0;
+        r_done <= 1'b0;
+        l_res <= l_res;
         if (!rstn)
         begin
-            r_done <= 1'b0;
             is_waiting <= 1'b0;
-            l_out <= 37'b0;
         end
         else
         begin
-            l_out <= l_out;
-            r_done <= 1'b0;
-            if (mdn_done && !is_waiting)
+            if (freq_done && !is_waiting)
             begin
                 is_waiting <= 1'b1;
             end
             else if (is_waiting)
             begin
-                r_done <= 1'b1;
-                is_waiting <= 1'b0;
-                l_out <= res;
+                wait_ctn <= wait_ctn + 2'b1;
+                if (wait_ctn == 2'b11)
+                begin
+                    wait_ctn <= 2'b00;
+                    is_waiting <= 1'b0;
+                    l_res <= res;
+                    r_done <= 1'b1;
+                end
             end
         end
     end
 
-    assign out = l_out;
     assign done = r_done;
+    assign c = l_res;
 endmodule

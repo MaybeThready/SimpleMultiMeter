@@ -94,38 +94,129 @@ endmodule
 */
 module BIN2BCD
 #(
-    parameter W = 16
+    parameter W = 16,
+    parameter BCD_WIDTH = W + (W - 4) / 3 + 1
 )
 (
-    input [W-1:0] bin,
-    output [W+(W-4)/3:0] bcd
+    input  [W-1:0] bin,
+    output [BCD_WIDTH-1:0] bcd
 );
-    reg [W+(W-4)/3:0] r_bcd;
+
+    localparam NUM_DIGITS = BCD_WIDTH / 4;
+
+    reg [BCD_WIDTH-1:0] bcd_temp;
     integer i, j;
 
-    always @(bin)
+    always @(*)
     begin
-        for (i = 0; i <= W + (W - 4) / 3; i = i + 1)
-        begin
-            r_bcd[i] = 0;
-        end
+        // 清零
+        bcd_temp = {BCD_WIDTH{1'b0}};
 
-        r_bcd[W-1:0] = bin;
-
-        for (i = 0; i <= W - 4; i = i + 1)
+        // Double Dabble
+        for (i = W-1; i >= 0; i = i - 1)
         begin
-            for (j = 0; j <= i / 3; j = j + 1)
+            // Step1：所有BCD位>=5则加3
+            for (j = 0; j < NUM_DIGITS; j = j + 1)
             begin
-                if (r_bcd[W-i+4*j-:4] > 4)
-                begin
-                    r_bcd[W-i+4*j-:4] = r_bcd[W-i+4*j-:4] + 4'd3;
-                end
+                if (bcd_temp[j*4 +: 4] >= 5)
+                    bcd_temp[j*4 +: 4] = bcd_temp[j*4 +: 4] + 4'd3;
             end
+
+            // Step2：整体左移一位，移入新的二进制位
+            bcd_temp = {bcd_temp[BCD_WIDTH-2:0], bin[i]};
         end
     end
 
-    assign bcd = r_bcd;
+    assign bcd = bcd_temp;
+
 endmodule
+
+// module UnsignedFixedPoint2BCD
+// #(
+//     parameter Q_IN_INT = 16,
+//     parameter Q_IN_FRAC = 16,
+//     parameter BCD_INT_NUM = 3,
+//     parameter BCD_FRAC_NUM = 3
+// )
+// (
+//     input clk, rstn,
+//     input [Q_IN_INT + Q_IN_FRAC - 1:0] in,
+//     output [BCD_INT_NUM*4 + BCD_FRAC_NUM*4 - 1:0] bcd
+// );
+//     wire [BCD_INT_NUM*4 - 1:0] bcd_int;
+//     wire [BCD_FRAC_NUM*4 - 1:0] bcd_frac;
+    
+//     wire [Q_IN_INT-1:0] int_part = in[Q_IN_INT + Q_IN_FRAC - 1:Q_IN_FRAC];
+//     wire [Q_IN_FRAC-1:0] frac_part = in[Q_IN_FRAC-1:0];
+
+//     localparam DESIRE_INT_WIDTH = $clog2(10**BCD_INT_NUM);
+//     wire [DESIRE_INT_WIDTH-1:0] norm_int;
+//     UnsignedFixedPointNorm #(
+//         .Q_IN_INT(Q_IN_INT),
+//         .Q_IN_FRAC(0),
+//         .Q_OUT_INT(DESIRE_INT_WIDTH),
+//         .Q_OUT_FRAC(0)
+//     ) norm_int_inst
+//     (
+//         .in(int_part),
+//         .out(norm_int)
+//     );
+
+//     BIN2BCD #(
+//         .W(DESIRE_INT_WIDTH),
+//         .BCD_WIDTH(BCD_INT_NUM*4)
+//     ) int_bin2bcd_inst
+//     (
+//         .bin(norm_int),
+//         .bcd(bcd_int)
+//     );
+
+//     localparam DESIRE_FRAC_WIDTH = $clog2(10**BCD_FRAC_NUM);
+//     wire [DESIRE_FRAC_WIDTH-1:0] norm_frac;
+
+//     UnsignedFixedPointMult #(
+//         .Q_IN_INT_A(0),
+//         .Q_IN_FRAC_A(Q_IN_FRAC),
+//         .Q_IN_INT_B(DESIRE_FRAC_WIDTH),
+//         .Q_IN_FRAC_B(0),
+//         .Q_OUT_INT(DESIRE_FRAC_WIDTH),
+//         .Q_OUT_FRAC(0)
+//     ) mult_inst
+//     (
+//         .clk(clk),
+//         .rstn(rstn),
+//         .in_a(frac_part),
+//         .in_b(10**BCD_FRAC_NUM),
+//         .out(norm_frac)
+//     );
+
+//     BIN2BCD #(
+//         .W(DESIRE_FRAC_WIDTH),
+//         .BCD_WIDTH(BCD_FRAC_NUM*4)
+//     ) frac_bin2bcd_inst
+//     (
+//         .bin(norm_frac),
+//         .bcd(bcd_frac)
+//     );
+
+//     reg [BCD_INT_NUM*4 + BCD_FRAC_NUM*4 - 1:0] r_bcd;
+//     reg [BCD_INT_NUM*4 - 1:0] bcd_int_prev;  // 整数计算要快一点，所以要延后
+//     always @(posedge clk or negedge rstn)
+//     begin
+//         if (!rstn)
+//         begin
+//             bcd_int_prev <= 0;
+//             r_bcd <= 0;
+//         end
+//         else
+//         begin
+//             bcd_int_prev <= bcd_int;
+//             r_bcd <= {bcd_int_prev, bcd_frac};
+//         end
+//     end
+
+//     assign bcd = r_bcd;
+// endmodule
 
 /** 有限状态机
 * clk: 时钟信号
