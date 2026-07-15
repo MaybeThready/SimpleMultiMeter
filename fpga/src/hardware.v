@@ -538,7 +538,7 @@ module ADS1118
     parameter CLK_FREQ = 100_000_000,
     parameter SPI_FREQ = 1_000_000,
     parameter WAIT_NS = 100,
-    parameter SAMPLE_RATE = 10000
+    parameter SAMPLE_RATE = 500
 )
 (
     input clk, rstn, d_in,
@@ -635,10 +635,10 @@ module FreqMeasure
         .signal_negedge(signal_negedge)
     );
 
-    localparam CNT_1S = CLK_FREQ;
+    localparam CNT_100MS = CLK_FREQ / 10;
     reg d_gate;
     wire d_gate_carry;
-    CTU #(CNT_1S) ctu
+    CTU #(CNT_100MS) ctu
     (
         .clk(clk),
         .rstn(d_gate),
@@ -724,13 +724,13 @@ endmodule
 module Buzzer
 #(
     parameter CLK_FREQ = 100_000_000,  // Hz
-    parameter BUZZER_FREQ = 440_000  // mHz
+    parameter BUZZER_FREQ = 880  // Hz
 )
 (
     input clk, rstn,
     output beep
 );
-    localparam DIV_CNT = CLK_FREQ * 1000 / BUZZER_FREQ;
+    localparam DIV_CNT = CLK_FREQ / BUZZER_FREQ;
     DIV #(DIV_CNT) div
     (
         .clk(clk),

@@ -26,3 +26,5 @@ fpga/simulation
 
 *.png
 *.pdf
+*.xlsx
+*.docx
