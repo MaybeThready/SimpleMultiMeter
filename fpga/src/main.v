@@ -765,22 +765,22 @@ module RMeasure
     localparam K3 = 32'd336203514,  B3 = 32'd2595952;
     localparam K4 = 32'd3457656989, B4 = 32'd27781245;
 
-    localparam FB0 = 20'd319653;
-    localparam FB1 = -20'd26869;
-    localparam FB2 = 20'd21339;
-    localparam FB3 = 20'd38799;
-    localparam FB4 = 20'd48175;
+    localparam FB0 = 21'd319653;
+    localparam FB1 = -21'd26869;
+    localparam FB2 = 21'd21339;
+    localparam FB3 = 21'd38799;
+    localparam FB4 = 21'd48175;
 
     localparam WAIT = 2'd0, CALC = 2'd1, JUDGE = 2'd2, LATCH = 2'd3;
 
     reg [31:0] k;
     reg [31:0] b;
-    reg [19:0] fb;
+    reg [20:0] fb;
     wire [31:0] midres;
     UnsignedFixedPointDiv #(
         .Q_IN_INT_A(20),
         .Q_IN_FRAC_A(12),
-        .Q_IN_INT_B(11),
+        .Q_IN_INT_B(12),
         .Q_IN_FRAC_B(9),
         .Q_OUT_INT(16),
         .Q_OUT_FRAC(16)
@@ -788,7 +788,7 @@ module RMeasure
         .clk(clk),
         .rstn(rstn),
         .in_a(k),
-        .in_b(mvoltage + fb),
+        .in_b({1'b0, mvoltage} + fb),
         .out(midres)
     );
 
@@ -937,7 +937,7 @@ module RMeasure
                     channel_switch_flag = 2'd0;
                     k = 32'd0;
                     b = 32'd0;
-                    fb = 20'd0;
+                    fb = 21'd0;
                 end
         endcase
     end
